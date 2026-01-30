@@ -6,6 +6,6 @@
     "description": "A plugin for annotations creation, management and sharing.",
     "icon": null,
     "includes": ["myPlugin.js"],
-    "modules": [],
+    "modules": ["vega"],
     "permaLoad": false
 }
