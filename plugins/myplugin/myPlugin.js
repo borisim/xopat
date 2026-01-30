@@ -71,9 +71,12 @@ class MyPlugin extends XOpatPlugin {
 				console.log("MyPlugin: Data loaded, starting clustering...");
 
 				this.points = this.processEmbeddings(this.data.embeddings);
+				this.initGraph();
+				console.log("Graph successfully initialized with PCA data.");
 			}
 
 			const registers = data.spatial_registers;
+			console.log(`MyPlugin: Received ${registers.length} points.`);
 			if (registers && Array.isArray(registers)) {
 				registers.forEach(coord => {
 					this.addStar(coord[0], coord[1]);
@@ -84,48 +87,157 @@ class MyPlugin extends XOpatPlugin {
 		}
 	}
 
-	handleUpdate(e) {
-		// // Check if the inputs actually exist and have been rendered
-		// if (!this.minInput?.element || !this.maxInput?.element) return;
 
-		// // Use querySelector on the .element property
-		// const minVal = this.minInput.element.querySelector('input').value;
-		// const maxVal = this.maxInput.element.querySelector('input').value;
 
-		console.log(e.target.value);
-		console.log(e);
-	}
-
-	generateClusterPoints(allEmbeddings, testCount = 50, k = 3) {
-		// 1. Slice the data for testing
-		const embeddings = allEmbeddings.slice(0, testCount);
-		console.log(`MyPlugin: Processing ${embeddings.length} embeddings...`);
-
-		// 2. Perform K-Means to generate labels (clusters)
-		// This groups points into 'k' groups automatically
-		const kmeans = ML.KMeans(embeddings, k);
-		const clusters = kmeans.clusters; // Array of cluster indices (0, 1, 2...)
-
-		// 3. Perform PCA to reduce to 2D
-		const pca = new ML.PCA(embeddings);
-		const projectedData = pca.predict(embeddings, { nComponents: 2 }).data;
-
-		// 4. Map to your plot format
-		const palette = [
-			{ main: "#ff5733" }, { main: "#33ff57" },
-			{ main: "#3357ff" }, { main: "#f333ff" }
+	processEmbeddings(embeddings, testCount = 5000, k = 4) {
+		// 1. Define a larger Master Palette
+		const MASTER_PALETTE = [
+			{ main: '#60A5FA', bg: '#DBEAFE' }, // Blue
+			{ main: '#34D399', bg: '#D1FAE5' }, // Green
+			{ main: '#FBBF24', bg: '#FEF3C7' }, // Amber
+			{ main: '#F87171', bg: '#FEE2E2' }, // Red
+			{ main: '#A78BFA', bg: '#EDE9FE' }, // Purple
+			{ main: '#F472B6', bg: '#FCE7F3' }, // Pink
+			{ main: '#FB923C', bg: '#FFEDD5' }  // Orange
 		];
 
-		return projectedData.map((point, index) => {
-			const clusterIdx = clusters[index];
+		// const embeddings = allEmbeddings.slice(0, testCount);
+
+		try {
+			// PCA (We know this works)
+			const pca = new ML.PCA(embeddings);
+			const projected = pca.predict(embeddings, { nComponents: 2 }).data;
+
+			// K-MEANS CALL (Based on your library code)
+			// It's a function named 'kmeans' inside the 'KMeans' object
+			const result = ML.KMeans.kmeans(embeddings, k);
+			const clusters = result.clusters;
+
+			const activePalette = Array.from({ length: k }, (_, i) => MASTER_PALETTE[i % MASTER_PALETTE.length]);
+
+			return projected.map((point, i) => {
+				const clusterIdx = clusters[i];
+				return {
+					x: point[0],
+					y: point[1],
+					clusterId: `Group ${clusterIdx + 1}`,
+					color: activePalette[clusterIdx].main, // Use the dynamic palette
+					clusterIndex: clusterIdx
+				};
+			});
+
+		} catch (err) {
+			console.error("MyPlugin: Math error", err);
+			return [];
+		}
+	}
+
+	initGraph() {
+		const canvas = document.getElementById('pointCloud');
+		const tooltip = document.getElementById('graph-tooltip');
+		if (!canvas || !tooltip || !this.points) return;
+		const ctx = canvas.getContext('2d');
+
+		const dpr = window.devicePixelRatio || 1;
+		canvas.width = 400 * dpr;
+		canvas.height = 400 * dpr;
+		canvas.style.width = '400px';
+		canvas.style.height = '400px';
+		ctx.scale(dpr, dpr);
+
+		// --- PCA COORDINATE SCALER ---
+		// PCA points are often small decimals; we must map them to 0-400px
+		const margin = 40;
+		const xCoords = this.points.map(p => p.x);
+		const yCoords = this.points.map(p => p.y);
+		const minX = Math.min(...xCoords), maxX = Math.max(...xCoords);
+		const minY = Math.min(...yCoords), maxY = Math.max(...yCoords);
+
+		this.points.forEach(p => {
+			p.canvasX = margin + ((p.x - minX) / (maxX - minX)) * (400 - margin * 2);
+			p.canvasY = margin + ((p.y - minY) / (maxY - minY)) * (400 - margin * 2);
+		});
+
+		// Calculate cluster centers based on NEW canvas coordinates
+		this.clusters = [...new Set(this.points.map(p => p.clusterIndex))].map(idx => {
+			const pInC = this.points.filter(p => p.clusterIndex === idx);
+			const palette = [
+				{ main: '#60A5FA', bg: '#DBEAFE' }, { main: '#34D399', bg: '#D1FAE5' },
+				{ main: '#FBBF24', bg: '#FEF3C7' }, { main: '#F87171', bg: '#FEE2E2' }
+			];
 			return {
-				x: point[0],
-				y: point[1],
-				clusterId: `Cluster ${clusterIdx}`,
-				color: palette[clusterIdx % palette.length].main,
-				clusterIndex: clusterIdx
+				index: idx,
+				id: pInC[0].clusterId,
+				color: palette[idx % palette.length].main,
+				bgColor: palette[idx % palette.length].bg,
+				count: pInC.length,
+				center: {
+					x: pInC.reduce((a, b) => a + b.canvasX, 0) / pInC.length,
+					y: pInC.reduce((a, b) => a + b.canvasY, 0) / pInC.length
+				}
 			};
 		});
+
+		let hoveredClusterIdx = null;
+
+		const draw = () => {
+			ctx.clearRect(0, 0, 400, 400);
+
+			// 1. Draw Background (using this.clusters center logic as you had it)
+			this.clusters.forEach(c => {
+				const isHovered = (hoveredClusterIdx === c.index);
+				ctx.globalAlpha = isHovered ? 0.3 : 0.05;
+				ctx.fillStyle = c.bgColor;
+				ctx.beginPath();
+				ctx.arc(c.center.x, c.center.y, 150, 0, Math.PI * 2);
+				ctx.fill();
+			});
+
+			// 2. Draw PCA Points
+			ctx.globalAlpha = 1.0;
+			this.points.forEach(p => {
+				const isHovered = p.clusterIndex === hoveredClusterIdx;
+				ctx.beginPath();
+				ctx.arc(p.canvasX, p.canvasY, isHovered ? 5 : 3, 0, Math.PI * 2);
+				ctx.fillStyle = p.color;
+				ctx.globalAlpha = (hoveredClusterIdx === null || isHovered) ? 1.0 : 0.2;
+				ctx.fill();
+				if (isHovered) {
+					ctx.strokeStyle = "white";
+					ctx.stroke();
+				}
+			});
+		};
+
+		canvas.onmousemove = (e) => {
+			const rect = canvas.getBoundingClientRect();
+			const mouseX = e.clientX - rect.left;
+			const mouseY = e.clientY - rect.top;
+
+			let closest = null, minDist = Infinity;
+			this.clusters.forEach(c => {
+				const d = Math.hypot(mouseX - c.center.x, mouseY - c.center.y);
+				if (d < minDist) { minDist = d; closest = c; }
+			});
+
+			hoveredClusterIdx = (minDist < 60) ? closest.index : null;
+			if (hoveredClusterIdx !== null) {
+				tooltip.style.display = 'block';
+				tooltip.style.left = `${e.clientX + 10}px`;
+				tooltip.style.top = `${e.clientY + 10}px`;
+				tooltip.innerHTML = `<strong>${closest.id}</strong>: ${closest.count} points`;
+			} else {
+				tooltip.style.display = 'none';
+			}
+			draw();
+		};
+
+		draw();
+	}
+
+	handleUpdate(e) {
+		console.log(e.target.value);
+		console.log(e);
 	}
 
 	initHTML() {
@@ -245,168 +357,6 @@ class MyPlugin extends XOpatPlugin {
 				title: "WSI Data Graph",
 			}, canvasHtml)
 		);
-		// 4. THE CLICKABLE LOGIC (PASTE THIS AT THE VERY BOTTOM OF initHTML)
-		setTimeout(() => {
-			const canvas = document.getElementById('pointCloud');
-			const tooltip = document.getElementById('graph-tooltip');
-			if (!canvas || !tooltip) return;
-			const ctx = canvas.getContext('2d');
-
-			// 1. DPI Scaling for crispness
-			const dpr = window.devicePixelRatio || 1;
-			canvas.width = 400 * dpr;
-			canvas.height = 400 * dpr;
-			canvas.style.width = '400px';
-			canvas.style.height = '400px';
-			ctx.scale(dpr, dpr);
-
-			// 2. Bright Professional Color Palette
-			const palette = [
-				{ main: '#60A5FA', bg: '#DBEAFE' }, // Blue
-				{ main: '#34D399', bg: '#D1FAE5' }, // Green
-				{ main: '#FBBF24', bg: '#FEF3C7' }, // Amber
-				{ main: '#F87171', bg: '#FEE2E2' }, // Red
-				{ main: '#A78BFA', bg: '#EDE9FE' }  // Purple
-			];
-
-			// 3. Generate Data with fixed Cluster IDs
-			const generatePoints = () => {
-				let allPoints = [];
-				const clusterSpecs = [
-					{ x: 100, y: 100, spread: 60, count: 50, id: "Alpha" },
-					{ x: 300, y: 120, spread: 70, count: 35, id: "Beta" },
-					{ x: 200, y: 300, spread: 80, count: 65, id: "Gamma" }
-				];
-
-				clusterSpecs.forEach((spec, index) => {
-					for (let i = 0; i < spec.count; i++) {
-						allPoints.push({
-							x: spec.x + (Math.random() - 0.5) * spec.spread,
-							y: spec.y + (Math.random() - 0.5) * spec.spread,
-							clusterId: spec.id,
-							color: palette[index % palette.length].main,
-							clusterIndex: index // Fixed index for highlighting
-						});
-					}
-				});
-				return allPoints;
-			};
-
-			// this.points = generatePoints();
-			// this.points = this.generateClusterPoints(this.data.embeddings);
-
-			// Calculate cluster centers for the background effect
-			this.clusters = [...new Set(this.points.map(p => p.clusterIndex))].map(idx => {
-				const pInC = this.points.filter(p => p.clusterIndex === idx);
-				return {
-					index: idx,
-					id: pInC[0].clusterId,
-					color: palette[idx % palette.length].main,
-					bgColor: palette[idx % palette.length].bg,
-					count: pInC.length,
-					center: {
-						x: pInC.reduce((a, b) => a + b.x, 0) / pInC.length,
-						y: pInC.reduce((a, b) => a + b.y, 0) / pInC.length
-					}
-				};
-			});
-
-			let hoveredClusterIdx = null;
-
-			const draw = () => {
-				ctx.clearRect(0, 0, 400, 400);
-
-				// 1. Draw Smooth Background Regions (Polygon Logic)
-				// Instead of a pixel loop, we fill the canvas and "clip" or overlap
-				this.clusters.forEach(c => {
-					const isHovered = (hoveredClusterIdx === c.index);
-
-					ctx.beginPath();
-					// We create a "soft" radial gradient for each cluster center 
-					// This makes the transition between regions feel high-end
-					const grad = ctx.createRadialGradient(
-						c.center.x, c.center.y, 0,
-						c.center.x, c.center.y, 300
-					);
-					grad.addColorStop(0, isHovered ? c.bgColor : "#ffffff");
-					grad.addColorStop(1, "#f8fafc");
-
-					ctx.fillStyle = grad;
-
-					// Drawing a simple Voronoi-approximation polygon
-					// For 3-5 clusters, filling the canvas with the closest-center 
-					// logic via a "clip" or path is much smoother than pixels.
-					ctx.globalAlpha = 0.5;
-					// In this optimized version, we use the pixel-check only 
-					// once to define a path, then let the GPU draw it smooth.
-
-					// SMOOTH FIX: We use a slightly larger cellSize (1) for 
-					// the mask to ensure sub-pixel smoothing.
-					const cellSize = 1;
-					for (let x = 0; x < 400; x += cellSize) {
-						let closest = null;
-						let minDist = Infinity;
-						this.clusters.forEach(target => {
-							const d = Math.hypot(x - target.center.x, 0 - target.center.y); // Simplified for path
-							if (d < minDist) { minDist = d; closest = target; }
-						});
-						// Native fillRect at 1px with alpha creates the smooth line
-						ctx.fillRect(x, 0, cellSize, 400);
-					}
-				});
-
-				// 2. Draw Points (The previous crisp logic)
-				ctx.globalAlpha = 1.0;
-				this.points.forEach(p => {
-					const isHovered = p.clusterIndex === hoveredClusterIdx;
-					ctx.beginPath();
-					ctx.arc(p.x, p.y, isHovered ? 4 : 2.5, 0, Math.PI * 2);
-					ctx.fillStyle = p.color;
-
-					// Fade out points not in the hovered cluster
-					ctx.globalAlpha = (hoveredClusterIdx === null || isHovered) ? 1.0 : 0.15;
-					ctx.fill();
-
-					if (isHovered) {
-						ctx.strokeStyle = "white";
-						ctx.lineWidth = 1.5;
-						ctx.stroke();
-					}
-				});
-				ctx.globalAlpha = 1.0;
-			};
-
-			// 4. Interaction Logic
-			canvas.onmousemove = (e) => {
-				const rect = canvas.getBoundingClientRect();
-				const x = e.clientX - rect.left;
-				const y = e.clientY - rect.top;
-
-				// Find which cluster center we are closest to
-				let closest = null;
-				let minDist = Infinity;
-				this.clusters.forEach(c => {
-					const d = Math.hypot(x - c.center.x, y - c.center.y);
-					if (d < minDist) { minDist = d; closest = c; }
-				});
-
-				if (minDist < 50) {
-					hoveredClusterIdx = closest.index;
-					canvas.style.cursor = 'pointer';
-					tooltip.style.display = 'block';
-					tooltip.style.left = `${x + 15}px`;
-					tooltip.style.top = `${y + 15}px`;
-					tooltip.innerHTML = `<strong>${closest.id}</strong><br>Layer Points: ${closest.count}`;
-				} else {
-					hoveredClusterIdx = null;
-					canvas.style.cursor = 'default';
-					tooltip.style.display = 'none';
-				}
-				draw();
-			};
-
-			draw();
-		}, 300);
 	}
 
 	/**
