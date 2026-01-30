@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "description": "A plugin for annotations creation, management and sharing.",
     "icon": null,
-    "includes": ["myPlugin.js"],
+    "includes": ["ml.min.js", "myPlugin.js"],
     "modules": ["vega"],
     "permaLoad": false
 }

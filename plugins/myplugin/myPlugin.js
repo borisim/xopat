@@ -14,10 +14,74 @@ class MyPlugin extends XOpatPlugin {
 	async pluginReady() {
 		this.initHTML();
 		console.log("MyPlugin: pluginReady");
-		var dummy_coords = [[62539, 91681], [28847, 112342], [58435, 99116], [47395, 113231], [59422, 107623]]; // for testing
-		dummy_coords.forEach(coord => {
-			this.addStar(coord[0], coord[1]);
-		});
+		// var dummy_coords = [[62539, 91681], [28847, 112342], [58435, 99116], [47395, 113231], [59422, 107623]]; // for testing
+		// dummy_coords.forEach(coord => {
+		// 	this.addStar(coord[0], coord[1]);
+		// });
+		// The slide path must be URL-encoded for the query string
+
+		// setTimeout(async () => {
+		// 	const slidePath = "/mnt/data/MOU/prostate/tile_level_annotations/P-2016_0383-12-0.mrxs";
+		// 	const url = `http://127.0.0.1:9999/get_spatial_registers?slide_path=${encodeURIComponent(slidePath)}`;
+
+		// 	console.log("MyPlugin: Requesting data from Ray...");
+
+		// 	try {
+		// 		const response = await fetch(url, {
+		// 			method: 'POST',
+		// 			mode: 'cors',
+		// 			// Setting credentials to 'omit' sometimes helps unstable tunnels
+		// 			credentials: 'omit'
+		// 		});
+
+		// 		if (!response.ok) throw new Error(`Ray error: ${response.status}`);
+
+		// 		const data = await response.json();
+		// 		const registers = data.spatial_registers;
+
+		// 		// BATCH DRAWING: Don't draw one by one immediately
+		// 		// Just print a count first to ensure data arrived
+		// 		console.log(`MyPlugin: Received ${registers.length} points.`);
+
+		// 		registers.forEach(coord => {
+		// 			this.addStar(coord[0], coord[1]);
+		// 		});
+
+		// 	} catch (e) {
+		// 		console.error("Connection to Ray failed:", e);
+		// 	}
+		// }, 500); // 500ms delay
+
+		try {
+			// Use './' to fetch relative to the current script's location
+			const response = await fetch("./plugins/myplugin/json_data.json");
+
+			if (!response.ok) {
+				// Plan B: Try the root-relative path if the above fails
+				console.warn("Relative path failed, trying root-relative...");
+				const altResponse = await fetch("plugins/myplugin/json_data.json");
+				if (!altResponse.ok) throw new Error("File not found in any expected location.");
+				var data = await altResponse.json();
+			} else {
+				var data = await response.json();
+			}
+
+			this.data = data;
+			if (this.data && this.data.embeddings) {
+				console.log("MyPlugin: Data loaded, starting clustering...");
+
+				this.points = this.processEmbeddings(this.data.embeddings);
+			}
+
+			const registers = data.spatial_registers;
+			if (registers && Array.isArray(registers)) {
+				registers.forEach(coord => {
+					this.addStar(coord[0], coord[1]);
+				});
+			}
+		} catch (error) {
+			console.error("MyPlugin: Error loading JSON:", error);
+		}
 	}
 
 	handleUpdate(e) {
@@ -30,6 +94,38 @@ class MyPlugin extends XOpatPlugin {
 
 		console.log(e.target.value);
 		console.log(e);
+	}
+
+	generateClusterPoints(allEmbeddings, testCount = 50, k = 3) {
+		// 1. Slice the data for testing
+		const embeddings = allEmbeddings.slice(0, testCount);
+		console.log(`MyPlugin: Processing ${embeddings.length} embeddings...`);
+
+		// 2. Perform K-Means to generate labels (clusters)
+		// This groups points into 'k' groups automatically
+		const kmeans = ML.KMeans(embeddings, k);
+		const clusters = kmeans.clusters; // Array of cluster indices (0, 1, 2...)
+
+		// 3. Perform PCA to reduce to 2D
+		const pca = new ML.PCA(embeddings);
+		const projectedData = pca.predict(embeddings, { nComponents: 2 }).data;
+
+		// 4. Map to your plot format
+		const palette = [
+			{ main: "#ff5733" }, { main: "#33ff57" },
+			{ main: "#3357ff" }, { main: "#f333ff" }
+		];
+
+		return projectedData.map((point, index) => {
+			const clusterIdx = clusters[index];
+			return {
+				x: point[0],
+				y: point[1],
+				clusterId: `Cluster ${clusterIdx}`,
+				color: palette[clusterIdx % palette.length].main,
+				clusterIndex: clusterIdx
+			};
+		});
 	}
 
 	initHTML() {
@@ -90,7 +186,7 @@ class MyPlugin extends XOpatPlugin {
 						console.log("MyPlugin: checkbox states:", this.checkbox);
 						setTimeout(() => {
 							let data = APPLICATION_CONTEXT.config.data;
-							data.push("053348649635572b823324e0b41f141a")
+							data.push("26b07a90fb215e06a13e98a1762819b0")
 							alert("Stars sent!");
 							APPLICATION_CONTEXT.openViewerWith(
 								data,
@@ -123,7 +219,26 @@ class MyPlugin extends XOpatPlugin {
 		);
 
 		// 3. THE CANVAS HTML
-		const canvasHtml = `<canvas id="pointCloud" width="400" height="400" style="background:#f0f0f0;"></canvas>`;
+		const canvasHtml = `
+			<div id="graph-container" style="position: relative; cursor: default; user-select: none;">
+				<canvas id="pointCloud" width="400" height="1500" style="background:#1a1a1a; border-radius: 8px; display: block;"></canvas>
+				<div id="graph-tooltip" style="
+					position: absolute; 
+					pointer-events: none; 
+					background: rgba(0, 0, 0, 0.85); 
+					color: white; 
+					padding: 8px 12px; 
+					border-radius: 4px; 
+					font-size: 12px; 
+					display: none; 
+					white-space: nowrap;
+					border: 1px solid #444;
+					box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+					z-index: 1000;
+				"></div>
+			</div>`;
+
+
 		USER_INTERFACE.addHtml(
 			new UI.FloatingWindow({
 				id: "graph-window",
@@ -133,131 +248,164 @@ class MyPlugin extends XOpatPlugin {
 		// 4. THE CLICKABLE LOGIC (PASTE THIS AT THE VERY BOTTOM OF initHTML)
 		setTimeout(() => {
 			const canvas = document.getElementById('pointCloud');
-			if (!canvas) return;
+			const tooltip = document.getElementById('graph-tooltip');
+			if (!canvas || !tooltip) return;
 			const ctx = canvas.getContext('2d');
 
-			// 1. Generate Dummy Data
-			const generateData = (count) => {
-				let points = [];
-				for (let i = 0; i < count; i++) {
-					points.push({
-						x: Math.random() * canvas.width,
-						y: Math.random() * canvas.height
-					});
-				}
-				return points;
-			};
+			// 1. DPI Scaling for crispness
+			const dpr = window.devicePixelRatio || 1;
+			canvas.width = 400 * dpr;
+			canvas.height = 400 * dpr;
+			canvas.style.width = '400px';
+			canvas.style.height = '400px';
+			ctx.scale(dpr, dpr);
 
-			// 2. Simple Clustering Logic (K-Means style grouping)
-			const clusterPoints = (points, k) => {
-				// Create random starting centroids
-				let centroids = points.slice(0, k);
-				let clusters = centroids.map((c, i) => ({ id: `cluster_${i}`, points: [], color: `rgba(${Math.random() * 255}, ${Math.random() * 255}, ${Math.random() * 255}, 0.3)` }));
+			// 2. Bright Professional Color Palette
+			const palette = [
+				{ main: '#60A5FA', bg: '#DBEAFE' }, // Blue
+				{ main: '#34D399', bg: '#D1FAE5' }, // Green
+				{ main: '#FBBF24', bg: '#FEF3C7' }, // Amber
+				{ main: '#F87171', bg: '#FEE2E2' }, // Red
+				{ main: '#A78BFA', bg: '#EDE9FE' }  // Purple
+			];
 
-				points.forEach(p => {
-					// Find closest centroid
-					let distances = centroids.map(c => Math.sqrt((p.x - c.x) ** 2 + (p.y - c.y) ** 2));
-					let closestIndex = distances.indexOf(Math.min(...distances));
-					clusters[closestIndex].points.push(p);
-				});
-				return clusters;
-			};
+			// 3. Generate Data with fixed Cluster IDs
+			const generatePoints = () => {
+				let allPoints = [];
+				const clusterSpecs = [
+					{ x: 100, y: 100, spread: 60, count: 50, id: "Alpha" },
+					{ x: 300, y: 120, spread: 70, count: 35, id: "Beta" },
+					{ x: 200, y: 300, spread: 80, count: 65, id: "Gamma" }
+				];
 
-			// const rawPoints = generateData(100);
-			// 1. Function to generate a cluster of points around a specific center
-			const generateCluster = (centerX, centerY, spread, count, id) => {
-				let points = [];
-				for (let i = 0; i < count; i++) {
-					points.push({
-						// Center point + random offset within the 'spread' range
-						x: centerX + (Math.random() - 0.5) * spread,
-						y: centerY + (Math.random() - 0.5) * spread,
-						clusterId: id
-					});
-				}
-				return points;
-			};
-
-			// 2. Create 3 visually distinct, correlated arrays of points
-			const cluster1 = generateCluster(100, 100, 80, 40, "Alpha");  // Top Left
-			const cluster2 = generateCluster(300, 150, 90, 40, "Beta");   // Middle Right
-			const cluster3 = generateCluster(150, 300, 100, 40, "Gamma"); // Bottom Center
-
-			// Combine them into one array for your clustering logic
-			const rawPoints = [...cluster1, ...cluster2, ...cluster3];
-			this.clusters = clusterPoints(rawPoints, 5);
-
-			const draw = () => {
-				ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-				// 1. Draw the "Background" Regions (Voronoi-style)
-				// We check every 5th pixel to save performance
-				const cellSize = 5;
-				for (let x = 0; x < canvas.width; x += cellSize) {
-					for (let y = 0; y < canvas.height; y += cellSize) {
-						let closestCluster = null;
-						let minDist = Infinity;
-
-						this.clusters.forEach(cluster => {
-							// Find distance to the cluster's center (mean of its points)
-							const center = cluster.center;
-							const dist = Math.sqrt((x - center.x) ** 2 + (y - center.y) ** 2);
-							if (dist < minDist) {
-								minDist = dist;
-								closestCluster = cluster;
-							}
+				clusterSpecs.forEach((spec, index) => {
+					for (let i = 0; i < spec.count; i++) {
+						allPoints.push({
+							x: spec.x + (Math.random() - 0.5) * spec.spread,
+							y: spec.y + (Math.random() - 0.5) * spec.spread,
+							clusterId: spec.id,
+							color: palette[index % palette.length].main,
+							clusterIndex: index // Fixed index for highlighting
 						});
-
-						if (closestCluster) {
-							ctx.fillStyle = closestCluster.color;
-							ctx.fillRect(x, y, cellSize, cellSize);
-						}
 					}
-				}
-
-				// 2. Draw the Points on top
-				this.clusters.forEach(cluster => {
-					ctx.fillStyle = "black";
-					cluster.points.forEach(p => {
-						ctx.beginPath();
-						ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
-						ctx.fill();
-					});
 				});
+				return allPoints;
 			};
 
-			// Update Cluster Centers before drawing
-			this.clusters.forEach(cluster => {
-				const xs = cluster.points.map(p => p.x);
-				const ys = cluster.points.map(p => p.y);
-				cluster.center = {
-					x: xs.reduce((a, b) => a + b, 0) / xs.length,
-					y: ys.reduce((a, b) => a + b, 0) / ys.length
+			// this.points = generatePoints();
+			// this.points = this.generateClusterPoints(this.data.embeddings);
+
+			// Calculate cluster centers for the background effect
+			this.clusters = [...new Set(this.points.map(p => p.clusterIndex))].map(idx => {
+				const pInC = this.points.filter(p => p.clusterIndex === idx);
+				return {
+					index: idx,
+					id: pInC[0].clusterId,
+					color: palette[idx % palette.length].main,
+					bgColor: palette[idx % palette.length].bg,
+					count: pInC.length,
+					center: {
+						x: pInC.reduce((a, b) => a + b.x, 0) / pInC.length,
+						y: pInC.reduce((a, b) => a + b.y, 0) / pInC.length
+					}
 				};
 			});
 
-			draw();
+			let hoveredClusterIdx = null;
 
-			// 3. Click Logic (Finds the closest cluster center - no overlaps!)
-			canvas.onclick = (event) => {
-				const rect = canvas.getBoundingClientRect();
-				const x = event.clientX - rect.left;
-				const y = event.clientY - rect.top;
+			const draw = () => {
+				ctx.clearRect(0, 0, 400, 400);
 
-				let selectedCluster = null;
-				let minDist = Infinity;
+				// 1. Draw Smooth Background Regions (Polygon Logic)
+				// Instead of a pixel loop, we fill the canvas and "clip" or overlap
+				this.clusters.forEach(c => {
+					const isHovered = (hoveredClusterIdx === c.index);
 
-				this.clusters.forEach(cluster => {
-					const dist = Math.sqrt((x - cluster.center.x) ** 2 + (y - cluster.center.y) ** 2);
-					if (dist < minDist) {
-						minDist = dist;
-						selectedCluster = cluster;
+					ctx.beginPath();
+					// We create a "soft" radial gradient for each cluster center 
+					// This makes the transition between regions feel high-end
+					const grad = ctx.createRadialGradient(
+						c.center.x, c.center.y, 0,
+						c.center.x, c.center.y, 300
+					);
+					grad.addColorStop(0, isHovered ? c.bgColor : "#ffffff");
+					grad.addColorStop(1, "#f8fafc");
+
+					ctx.fillStyle = grad;
+
+					// Drawing a simple Voronoi-approximation polygon
+					// For 3-5 clusters, filling the canvas with the closest-center 
+					// logic via a "clip" or path is much smoother than pixels.
+					ctx.globalAlpha = 0.5;
+					// In this optimized version, we use the pixel-check only 
+					// once to define a path, then let the GPU draw it smooth.
+
+					// SMOOTH FIX: We use a slightly larger cellSize (1) for 
+					// the mask to ensure sub-pixel smoothing.
+					const cellSize = 1;
+					for (let x = 0; x < 400; x += cellSize) {
+						let closest = null;
+						let minDist = Infinity;
+						this.clusters.forEach(target => {
+							const d = Math.hypot(x - target.center.x, 0 - target.center.y); // Simplified for path
+							if (d < minDist) { minDist = d; closest = target; }
+						});
+						// Native fillRect at 1px with alpha creates the smooth line
+						ctx.fillRect(x, 0, cellSize, 400);
 					}
 				});
 
-				console.log("Clicked Cluster ID:", selectedCluster.id);
-				alert("Selected: " + selectedCluster.id);
+				// 2. Draw Points (The previous crisp logic)
+				ctx.globalAlpha = 1.0;
+				this.points.forEach(p => {
+					const isHovered = p.clusterIndex === hoveredClusterIdx;
+					ctx.beginPath();
+					ctx.arc(p.x, p.y, isHovered ? 4 : 2.5, 0, Math.PI * 2);
+					ctx.fillStyle = p.color;
+
+					// Fade out points not in the hovered cluster
+					ctx.globalAlpha = (hoveredClusterIdx === null || isHovered) ? 1.0 : 0.15;
+					ctx.fill();
+
+					if (isHovered) {
+						ctx.strokeStyle = "white";
+						ctx.lineWidth = 1.5;
+						ctx.stroke();
+					}
+				});
+				ctx.globalAlpha = 1.0;
 			};
+
+			// 4. Interaction Logic
+			canvas.onmousemove = (e) => {
+				const rect = canvas.getBoundingClientRect();
+				const x = e.clientX - rect.left;
+				const y = e.clientY - rect.top;
+
+				// Find which cluster center we are closest to
+				let closest = null;
+				let minDist = Infinity;
+				this.clusters.forEach(c => {
+					const d = Math.hypot(x - c.center.x, y - c.center.y);
+					if (d < minDist) { minDist = d; closest = c; }
+				});
+
+				if (minDist < 50) {
+					hoveredClusterIdx = closest.index;
+					canvas.style.cursor = 'pointer';
+					tooltip.style.display = 'block';
+					tooltip.style.left = `${x + 15}px`;
+					tooltip.style.top = `${y + 15}px`;
+					tooltip.innerHTML = `<strong>${closest.id}</strong><br>Layer Points: ${closest.count}`;
+				} else {
+					hoveredClusterIdx = null;
+					canvas.style.cursor = 'default';
+					tooltip.style.display = 'none';
+				}
+				draw();
+			};
+
+			draw();
 		}, 300);
 	}
 
@@ -349,12 +497,44 @@ class MyPlugin extends XOpatPlugin {
 				try {
 					const item = VIEWER.world.getItemAt(0);
 					if (!item) return;
+
+					const currentZoom = VIEWER.viewport.getZoom();
+
+					// 1. SET ZOOM THRESHOLD
+					// Change 0.5 to your preferred zoom level (higher = must zoom in more)
+					const minZoomToShow = 5;
+					const isZoomedInEnough = currentZoom >= minZoomToShow;
+
+					// 2. GET VIEWPORT BOUNDS (Image Coordinates)
+					// This tells us exactly what part of the image is on screen
+					const viewportBounds = VIEWER.viewport.getBounds();
+					const imageBounds = VIEWER.viewport.viewportToImageRectangle(viewportBounds);
+
 					this._starOverlays.forEach(rec => {
 						try {
-							const vp = (item.imageToViewportCoordinates)
-								? item.imageToViewportCoordinates(rec.x, rec.y, true)
-								: VIEWER.viewport.imageToViewportCoordinates(rec.x, rec.y, true);
+							// 3. CULLING LOGIC
+							// Check if the star's X/Y is within the current visible rectangle
+							const isVisible = isZoomedInEnough &&
+								rec.x >= imageBounds.x &&
+								rec.x <= (imageBounds.x + imageBounds.width) &&
+								rec.y >= imageBounds.y &&
+								rec.y <= (imageBounds.y + imageBounds.height);
+
+							if (!isVisible) {
+								rec.el.style.display = 'none'; // Hide it entirely
+								return; // Skip expensive coordinate calculations
+							}
+
+							// 4. ONLY CALCULATE FOR VISIBLE STARS
+							rec.el.style.display = 'flex';
+							const vp = item.imageToViewportCoordinates(rec.x, rec.y, true);
 							const px = VIEWER.viewport.pixelFromPoint(vp, true);
+
+							let dynamicSize = rec.sizePx * (currentZoom * 0.01);
+							dynamicSize = Math.max(12, Math.min(dynamicSize, 64));
+
+							rec.el.style.width = Math.round(dynamicSize) + 'px';
+							rec.el.style.height = Math.round(dynamicSize) + 'px';
 							rec.el.style.left = Math.round(px.x) + 'px';
 							rec.el.style.top = Math.round(px.y) + 'px';
 						} catch (e) { }
